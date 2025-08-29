@@ -1,4 +1,4 @@
-// server.js — Withings OAuth + Notifications + LINE weekly summary + LINE webhook (Full)
+// server.js — Withings OAuth + Notifications + LINE weekly summary + LINE webhook (patched)
 require('dotenv').config();
 const path = require('path');
 const express = require('express');
@@ -8,11 +8,72 @@ const cron = require('node-cron');
 const line = require('@line/bot-sdk');
 
 const app = express();
-app.use(express.urlencoded({ extended: true })); // parse x-www-form-urlencoded (Withings notify)
+
+// ===================== LINE (REGISTER BEFORE BODY PARSERS) =====================
+// LINE config
+const lineConfig = (() => {
+  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
+  const secret = process.env.LINE_CHANNEL_SECRET || '';
+  if (token && secret) return { channelAccessToken: token, channelSecret: secret };
+  return null;
+})();
+const lineClient = lineConfig ? new line.Client(lineConfig) : null;
+
+// Capture userId
+let LAST_LINE_USER_ID = null;
+
+// Webhook route: return 200 even if not configured so LINE "Verify" succeeds
+app.post(
+  '/line/webhook',
+  (req, res, next) => {
+    if (!lineClient || !lineConfig) {
+      console.warn('[LINE] Not configured yet, returning 200 for Verify');
+      return res.status(200).end();
+    }
+    return next();
+  },
+  // IMPORTANT: no body parser before this middleware
+  line.middleware(lineConfig || { channelAccessToken: 'dummy', channelSecret: 'dummy' }),
+  async (req, res) => {
+    try {
+      const events = req.body.events || [];
+      for (const ev of events) {
+        if (ev.source?.userId) LAST_LINE_USER_ID = ev.source.userId;
+        if (ev.type === 'message' && ev.replyToken && lineClient) {
+          await lineClient.replyMessage(ev.replyToken, {
+            type: 'text',
+            text: `รับข้อมูลแล้ว ✅ userId: ${ev.source.userId}`
+          });
+        }
+      }
+      res.status(200).end();
+    } catch (e) {
+      console.error('LINE webhook error:', e.message);
+      res.status(200).end(); // still 200 to avoid Verify failure
+    }
+  }
+);
+
+// Helper route always available
+app.get('/line/last-user', (req, res) => {
+  if (!lineClient) {
+    return res
+      .type('text')
+      .send('LINE not configured — ใส่ LINE_CHANNEL_ACCESS_TOKEN และ LINE_CHANNEL_SECRET ใน Render แล้ว Restart');
+  }
+  res
+    .type('text')
+    .send(LAST_LINE_USER_ID
+      ? `LAST_LINE_USER_ID = ${LAST_LINE_USER_ID}`
+      : 'ยังไม่มี userId — กรุณาเพิ่มบอทเป็นเพื่อนและทักข้อความใส่มาที่บอทก่อน');
+});
+
+// ===================== BODY PARSERS & STATIC (AFTER LINE WEBHOOK) =====================
+app.use(express.urlencoded({ extended: true })); // for Withings notify (x-www-form-urlencoded)
 app.use(express.json());
 app.use('/public', express.static('public'));
 
-// ===== Withings OAuth basic setup =====
+// ===================== WITHINGS OAUTH / API =====================
 const CLIENT_ID = process.env.WITHINGS_CLIENT_ID;
 const CLIENT_SECRET = process.env.WITHINGS_CLIENT_SECRET;
 const SCOPE = process.env.WITHINGS_SCOPE || 'user.metrics';
@@ -119,7 +180,7 @@ async function ensureAccessToken() {
   return TOKENS.access_token;
 }
 
-// ===== Withings Data Fetch (BP) =====
+// Withings data (BP)
 app.get('/api/bp', async (req, res) => {
   try {
     const access = await ensureAccessToken();
@@ -161,9 +222,9 @@ app.get('/api/bp', async (req, res) => {
   }
 });
 
-// ===== Withings Notifications =====
+// Withings notifications
 app.get('/withings/subscribe', async (req, res) => {
-  const appli = parseInt(req.query.appli || '4', 10); // default pressure
+  const appli = parseInt(req.query.appli || '4', 10); // 4 = blood pressure
   try {
     const access = await ensureAccessToken();
     const callbackurl = `${baseUrlFrom(req)}/withings/notify`;
@@ -210,52 +271,7 @@ app.post('/withings/notify', async (req, res) => {
   }
 });
 
-// ===== LINE Messaging API =====
-const lineConfig = (() => {
-  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
-  const secret = process.env.LINE_CHANNEL_SECRET || '';
-  if (token && secret) return { channelAccessToken: token, channelSecret: secret };
-  return null;
-})();
-const lineClient = lineConfig ? new line.Client(lineConfig) : null;
-
-// Capture userId via webhook
-let LAST_LINE_USER_ID = null;
-
-// Webhook route (only when LINE is configured)
-if (lineConfig) {
-  app.post('/line/webhook', line.middleware(lineConfig), async (req, res) => {
-    try {
-      const events = req.body.events || [];
-      for (const ev of events) {
-        if (ev.source?.userId) LAST_LINE_USER_ID = ev.source.userId;
-        if (ev.type === 'message' && ev.replyToken) {
-          await lineClient.replyMessage(ev.replyToken, { type: 'text', text: `รับข้อมูลแล้ว ✅ userId: ${ev.source.userId}` });
-        }
-      }
-      res.status(200).end();
-    } catch (e) {
-      console.error('LINE webhook error:', e.message);
-      res.status(500).end();
-    }
-  });
-}
-
-// Make /line/last-user always available (even if LINE env not set yet)
-app.get('/line/last-user', (req, res) => {
-  if (!lineClient) {
-    return res
-      .type('text')
-      .send('LINE not configured — ใส่ LINE_CHANNEL_ACCESS_TOKEN และ LINE_CHANNEL_SECRET ใน Render แล้ว Restart');
-  }
-  res
-    .type('text')
-    .send(LAST_LINE_USER_ID
-      ? `LAST_LINE_USER_ID = ${LAST_LINE_USER_ID}`
-      : 'ยังไม่มี userId — กรุณาเพิ่มบอทเป็นเพื่อนและทักข้อความใส่มาที่บอทก่อน');
-});
-
-// Weekly summary (Thai)
+// ===================== LINE PUSH & CRON =====================
 async function buildWeeklySummaryTH(days=7){
   const access = await ensureAccessToken();
   const end = Math.floor(Date.now()/1000);
@@ -275,17 +291,17 @@ async function buildWeeklySummaryTH(days=7){
   });
   const grps = data.body?.measuregrps || [];
   const rows = [];
-  for(const g of grps){
+  for (const g of grps){
     const ts = g.date;
     let sbp, dbp, hr;
-    for(const m of g.measures){
-      if(m.type===10) sbp = m.value * Math.pow(10, m.unit);
-      if(m.type===9)  dbp = m.value * Math.pow(10, m.unit);
-      if(m.type===11) hr  = m.value * Math.pow(10, m.unit);
+    for (const m of g.measures){
+      if (m.type===10) sbp = m.value * Math.pow(10, m.unit);
+      if (m.type===9)  dbp = m.value * Math.pow(10, m.unit);
+      if (m.type===11) hr  = m.value * Math.pow(10, m.unit);
     }
-    if(sbp!=null && dbp!=null) rows.push({ts, sbp, dbp, hr: hr??null});
+    if (sbp!=null && dbp!=null) rows.push({ts, sbp, dbp, hr: hr??null});
   }
-  if(!rows.length) return "สรุป BP รายสัปดาห์: ไม่พบข้อมูลในช่วงที่ผ่านมา";
+  if (!rows.length) return "สรุป BP รายสัปดาห์: ไม่พบข้อมูลในช่วงที่ผ่านมา";
 
   const avg = arr => arr.reduce((a,b)=>a+b,0)/arr.length;
   const sbps = rows.map(r=>r.sbp);
@@ -305,47 +321,32 @@ async function buildWeeklySummaryTH(days=7){
 
 // Manual trigger to send weekly summary to LINE_USER_ID
 app.get('/line/send-weekly', async (req, res) => {
-  try{
-    if(!lineClient) return res.status(400).send('LINE not configured');
+  try {
+    if (!lineClient) return res.status(400).send('LINE not configured');
     const to = process.env.LINE_USER_ID;
-    if(!to) return res.status(400).send('Missing LINE_USER_ID env');
+    if (!to) return res.status(400).send('Missing LINE_USER_ID env');
     const text = await buildWeeklySummaryTH(7);
     await lineClient.pushMessage(to, { type: 'text', text });
     res.send('LINE weekly summary sent.');
-  }catch(e){
-    res.status(500).send('LINE send failed: '+e.message);
+  } catch (e) {
+    res.status(500).send('LINE send failed: ' + e.message);
   }
 });
 
 // Simple test push
 app.get('/line/test-push', async (req, res) => {
-  try{
-    if(!lineClient) return res.status(400).send('LINE not configured');
+  try {
+    if (!lineClient) return res.status(400).send('LINE not configured');
     const to = process.env.LINE_USER_ID;
-    if(!to) return res.status(400).send('Missing LINE_USER_ID env');
+    if (!to) return res.status(400).send('Missing LINE_USER_ID env');
     await lineClient.pushMessage(to, { type: 'text', text: 'ทดสอบส่งจากระบบ Withings ✅' });
     res.send('Sent test push.');
-  }catch(e){
-    res.status(500).send('LINE push failed: '+e.message);
+  } catch (e) {
+    res.status(500).send('LINE push failed: ' + e.message);
   }
 });
 
-// Weekly cron (Mon 09:00 Asia/Bangkok)
-if (lineClient) {
-  cron.schedule('0 9 * * MON', async () => {
-    try{
-      const to = process.env.LINE_USER_ID;
-      if(!to || !TOKENS) return; // needs target and tokens
-      const text = await buildWeeklySummaryTH(7);
-      await lineClient.pushMessage(to, { type: 'text', text });
-      console.log('[cron] Sent weekly summary to LINE_USER_ID');
-    }catch(e){
-      console.error('[cron] Failed weekly summary:', e.message);
-    }
-  }, { timezone: 'Asia/Bangkok' });
-}
-
-// Serve chart via route + static
+// ===================== UI =====================
 app.get('/chart', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'chart.html'));
 });
