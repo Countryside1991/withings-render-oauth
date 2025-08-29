@@ -1,5 +1,6 @@
-// server.js — พร้อมใช้บน Render หรือรันท้องถิ่น (CommonJS)
+// server.js — พร้อมใช้บน Render หรือรันท้องถิ่น (CommonJS) — รุ่นเพิ่ม route /chart
 require('dotenv').config();
+const path = require('path');
 const express = require('express');
 const axios = require('axios');
 const qs = require('qs');
@@ -36,7 +37,7 @@ app.get('/', (req, res) => {
     <p>Redirect URI ที่ต้องไปตั้งใน Withings Developer:<br/>
        <code>${base}/oauth/callback</code></p>
     <p><a href="${u.toString()}"><button>Authorize Withings ${USE_DEMO ? '(DEMO)' : ''}</button></a></p>
-    <p><a href="/public/chart.html">View BP Chart</a> (หลัง authorize)</p>
+    <p><a href="/chart">View BP Chart</a> (หลัง authorize)</p>
     <pre>Tokens: ${TOKENS ? 'READY' : 'None'}</pre>
   `);
 });
@@ -73,7 +74,7 @@ app.get('/oauth/callback', async (req, res) => {
       <h2>Authorized ✅</h2>
       <p>UserID: ${TOKENS.userid}</p>
       <p>Access token พร้อมใช้งาน (ตัวอย่างนี้เก็บชั่วคราวในหน่วยความจำ)</p>
-      <p>ต่อไป: เปิด <a href="/public/chart.html">BP Chart</a></p>
+      <p>ต่อไป: เปิด <a href="/chart">BP Chart</a></p>
     `);
   } catch (e) {
     res.status(500).send('Token exchange failed: ' + e.message);
@@ -144,6 +145,11 @@ app.get('/api/bp', async (req, res) => {
   } catch (e) {
     res.status(401).json({ error: e.message });
   }
+});
+
+// เสิร์ฟไฟล์กราฟโดยตรง (fallback เผื่อ static ไม่ทำงาน)
+app.get('/chart', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'chart.html'));
 });
 
 const PORT = process.env.PORT || 3000;
