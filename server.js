@@ -1,10 +1,4 @@
-// server.js — Withings OAuth + Notifications + LINE weekly summary (TH)
-// Works on Render (web service).
-// Env needed: WITHINGS_CLIENT_ID, WITHINGS_CLIENT_SECRET, WITHINGS_SCOPE=user.metrics
-// Optional: WITHINGS_USE_DEMO=true/false
-// For LINE: LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, LINE_USER_ID (for test push)
-// Note: For webhooks, add https://YOUR_DOMAIN/withings/notify in Withings "Callback URI" list (Developer Dashboard).
-
+// server.js — Withings OAuth + Notifications + LINE weekly summary + LINE webhook (Full)
 require('dotenv').config();
 const path = require('path');
 const express = require('express');
@@ -14,7 +8,7 @@ const cron = require('node-cron');
 const line = require('@line/bot-sdk');
 
 const app = express();
-app.use(express.urlencoded({ extended: true })); // parse x-www-form-urlencoded (Withings notifications)
+app.use(express.urlencoded({ extended: true })); // parse x-www-form-urlencoded (Withings notify)
 app.use(express.json());
 app.use('/public', express.static('public'));
 
@@ -41,19 +35,21 @@ app.get('/', (req, res) => {
   u.searchParams.set('state', Math.random().toString(36).slice(2));
   if (USE_DEMO) u.searchParams.set('mode', 'demo');
 
-  const notifyUrl = `${base}/withings/notify`;
-
   res.type('html').send(`
     <h1>Withings OAuth Quickstart + LINE</h1>
     <p>Base URL: <code>${base}</code></p>
     <p>Redirect URI (Withings Developer): <code>${base}/oauth/callback</code></p>
     <p>Callback URI for Notifications (add in Withings Developer "Callback URI" list):<br/>
-      <code>${notifyUrl}</code>
+      <code>${base}/withings/notify</code>
+    </p>
+    <p>LINE Webhook URL (optional, for capturing userId):<br/>
+      <code>${base}/line/webhook</code>
     </p>
     <p><a href="${u.toString()}"><button>Authorize Withings ${USE_DEMO ? '(DEMO)' : ''}</button></a></p>
     <p><a href="/chart">ดูกราฟ BP</a> (หลัง authorize)</p>
     <p><a href="/withings/subscribe?appli=4">Subscribe Notifications (BP)</a> — ต้อง authorize แล้วก่อน</p>
-    <p><a href="/line/test-push">ทดสอบส่ง LINE</a> — ต้องตั้งค่า LINE_* env ไว้</p>
+    <p><a href="/line/test-push">ทดสอบส่ง LINE</a> — ตั้งค่า LINE_* แล้ว และมี LINE_USER_ID</p>
+    <p><a href="/line/last-user">ดู userId ล่าสุดที่ webhook จับได้</a> (หลังจากทักแชตบอท)</p>
     <pre>Tokens: ${TOKENS ? 'READY for userid ' + TOKENS.userid : 'None'}</pre>
   `);
 });
@@ -166,7 +162,6 @@ app.get('/api/bp', async (req, res) => {
 });
 
 // ===== Withings Notifications =====
-// Subscribe helper — appli=4 for BP (pressure), see docs
 app.get('/withings/subscribe', async (req, res) => {
   const appli = parseInt(req.query.appli || '4', 10); // default pressure
   try {
@@ -178,7 +173,6 @@ app.get('/withings/subscribe', async (req, res) => {
       appli,
       comment: 'demo subscribe'
     };
-    // Withings expects x-www-form-urlencoded body + Bearer header
     const { data } = await axios.post('https://wbsapi.withings.net/notify', qs.stringify(payload), {
       headers: {
         'Authorization': `Bearer ${access}`,
@@ -191,15 +185,10 @@ app.get('/withings/subscribe', async (req, res) => {
   }
 });
 
-// Webhook receiver (must be reachable and listed in Withings Callback URI)
 app.post('/withings/notify', async (req, res) => {
-  // Withings sends form-urlencoded fields (userid, appli, startdate, enddate, etc.)
-  // Acknowledge ASAP to avoid retries
   console.log('Withings notify payload:', req.body);
   res.status(200).send('OK');
-
   try {
-    // Optional: after ack, fetch the new window using startdate/enddate
     const { startdate, enddate } = req.body || {};
     const access = await ensureAccessToken();
     const params = {
@@ -221,7 +210,7 @@ app.post('/withings/notify', async (req, res) => {
   }
 });
 
-// ===== LINE Messaging =====
+// ===== LINE Messaging API =====
 const lineConfig = (() => {
   const token = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
   const secret = process.env.LINE_CHANNEL_SECRET || '';
@@ -230,7 +219,33 @@ const lineConfig = (() => {
 })();
 const lineClient = lineConfig ? new line.Client(lineConfig) : null;
 
-// Summarize last 7 days BP in Thai
+// Capture userId via webhook
+let LAST_LINE_USER_ID = null;
+
+if (lineConfig) {
+  app.post('/line/webhook', line.middleware(lineConfig), async (req, res) => {
+    try {
+      const events = req.body.events || [];
+      for (const ev of events) {
+        if (ev.source?.userId) LAST_LINE_USER_ID = ev.source.userId;
+        if (ev.type === 'message' && ev.replyToken) {
+          await lineClient.replyMessage(ev.replyToken, { type: 'text', text: `รับข้อมูลแล้ว ✅ userId: ${ev.source.userId}` });
+        }
+      }
+      res.status(200).end();
+    } catch (e) {
+      console.error('LINE webhook error:', e.message);
+      res.status(500).end();
+    }
+  });
+
+  // Helper to show the last captured userId
+  app.get('/line/last-user', (req, res) => {
+    res.type('text').send(LAST_LINE_USER_ID ? `LAST_LINE_USER_ID = ${LAST_LINE_USER_ID}` : 'ยังไม่มี userId — กรุณาเพิ่มบอทเป็นเพื่อนและทักข้อความใส่มาที่บอทก่อน');
+  });
+}
+
+// Weekly summary (Thai)
 async function buildWeeklySummaryTH(days=7){
   const access = await ensureAccessToken();
   const end = Math.floor(Date.now()/1000);
@@ -305,25 +320,4 @@ app.get('/line/test-push', async (req, res) => {
   }
 });
 
-// Weekly cron (จันทร์ 9:00 เวลาไทย)
-if (lineClient) {
-  cron.schedule('0 9 * * MON', async () => {
-    try{
-      const to = process.env.LINE_USER_ID;
-      if(!to || !TOKENS) return; // needs target and tokens
-      const text = await buildWeeklySummaryTH(7);
-      await lineClient.pushMessage(to, { type: 'text', text });
-      console.log('[cron] Sent weekly summary to LINE_USER_ID');
-    }catch(e){
-      console.error('[cron] Failed weekly summary:', e.message);
-    }
-  }, { timezone: 'Asia/Bangkok' });
-}
-
-// Serve chart via route (fallback) + static
-app.get('/chart', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'chart.html'));
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Server listening on', PORT));
+// Weekly cr
