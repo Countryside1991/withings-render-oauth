@@ -289,7 +289,8 @@ async function buildWeeklySummaryTH(days=7){
     `SBP เฉลี่ย: ${avg(sbps).toFixed(1)} (สูงสุด ${hiSBP}, ต่ำสุด ${loSBP})`,
     `DBP เฉลี่ย: ${avg(dbps).toFixed(1)} (สูงสุด ${hiDBP}, ต่ำสุด ${loDBP})`,
     hrs.length? `HR เฉลี่ย: ${avg(hrs).toFixed(1)} bpm` : null
-  ].filter(Boolean).join("\n");
+  ].filter(Boolean).join("
+");
   return msg;
 }
 
@@ -320,4 +321,25 @@ app.get('/line/test-push', async (req, res) => {
   }
 });
 
-// Weekly cr
+// Weekly cron (Mon 09:00 Asia/Bangkok)
+if (lineClient) {
+  cron.schedule('0 9 * * MON', async () => {
+    try{
+      const to = process.env.LINE_USER_ID;
+      if(!to || !TOKENS) return; // needs target and tokens
+      const text = await buildWeeklySummaryTH(7);
+      await lineClient.pushMessage(to, { type: 'text', text });
+      console.log('[cron] Sent weekly summary to LINE_USER_ID');
+    }catch(e){
+      console.error('[cron] Failed weekly summary:', e.message);
+    }
+  }, { timezone: 'Asia/Bangkok' });
+}
+
+// Serve chart via route + static
+app.get('/chart', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'chart.html'));
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('Server listening on', PORT));
