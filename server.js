@@ -8,7 +8,7 @@ const app = express();
 app.use('/public', express.static('public'));
 
 const CLIENT_ID = process.env.WITHINGS_CLIENT_ID;
-theCLIENT_SECRET = process.env.WITHINGS_CLIENT_SECRET;
+const CLIENT_SECRET = process.env.WITHINGS_CLIENT_SECRET;
 const SCOPE = process.env.WITHINGS_SCOPE || 'user.metrics';
 const USE_DEMO = String(process.env.WITHINGS_USE_DEMO || 'true') === 'true';
 
