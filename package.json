@@ -1,6 +1,6 @@
 {
   "name": "withings-render-oauth",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,6 +9,8 @@
     "axios": "^1.7.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "qs": "^6.12.1"
+    "qs": "^6.12.1",
+    "@line/bot-sdk": "^7.5.2",
+    "node-cron": "^3.0.3"
   }
 }
