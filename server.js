@@ -42,7 +42,7 @@ app.get('/', (req, res) => {
     <p>Callback URI for Notifications (add in Withings Developer "Callback URI" list):<br/>
       <code>${base}/withings/notify</code>
     </p>
-    <p>LINE Webhook URL (optional, for capturing userId):<br/>
+    <p>LINE Webhook URL (for capturing userId):<br/>
       <code>${base}/line/webhook</code>
     </p>
     <p><a href="${u.toString()}"><button>Authorize Withings ${USE_DEMO ? '(DEMO)' : ''}</button></a></p>
@@ -222,6 +222,7 @@ const lineClient = lineConfig ? new line.Client(lineConfig) : null;
 // Capture userId via webhook
 let LAST_LINE_USER_ID = null;
 
+// Webhook route (only when LINE is configured)
 if (lineConfig) {
   app.post('/line/webhook', line.middleware(lineConfig), async (req, res) => {
     try {
@@ -238,12 +239,21 @@ if (lineConfig) {
       res.status(500).end();
     }
   });
-
-  // Helper to show the last captured userId
-  app.get('/line/last-user', (req, res) => {
-    res.type('text').send(LAST_LINE_USER_ID ? `LAST_LINE_USER_ID = ${LAST_LINE_USER_ID}` : 'ยังไม่มี userId — กรุณาเพิ่มบอทเป็นเพื่อนและทักข้อความใส่มาที่บอทก่อน');
-  });
 }
+
+// Make /line/last-user always available (even if LINE env not set yet)
+app.get('/line/last-user', (req, res) => {
+  if (!lineClient) {
+    return res
+      .type('text')
+      .send('LINE not configured — ใส่ LINE_CHANNEL_ACCESS_TOKEN และ LINE_CHANNEL_SECRET ใน Render แล้ว Restart');
+  }
+  res
+    .type('text')
+    .send(LAST_LINE_USER_ID
+      ? `LAST_LINE_USER_ID = ${LAST_LINE_USER_ID}`
+      : 'ยังไม่มี userId — กรุณาเพิ่มบอทเป็นเพื่อนและทักข้อความใส่มาที่บอทก่อน');
+});
 
 // Weekly summary (Thai)
 async function buildWeeklySummaryTH(days=7){
@@ -289,8 +299,7 @@ async function buildWeeklySummaryTH(days=7){
     `SBP เฉลี่ย: ${avg(sbps).toFixed(1)} (สูงสุด ${hiSBP}, ต่ำสุด ${loSBP})`,
     `DBP เฉลี่ย: ${avg(dbps).toFixed(1)} (สูงสุด ${hiDBP}, ต่ำสุด ${loDBP})`,
     hrs.length? `HR เฉลี่ย: ${avg(hrs).toFixed(1)} bpm` : null
-  ].filter(Boolean).join("
-");
+  ].filter(Boolean).join("\n");
   return msg;
 }
 
