@@ -33,6 +33,7 @@
         ใช้ข้อมูลตัวอย่างอัตโนมัติเมื่อไม่มีข้อมูลจริง
       </label>
       <button id="reload">โหลดข้อมูล</button>
+      <button id="sendWeekly">ส่งสรุป 7 วัน (LINE)</button>
       <a href="/" style="margin-left:auto">หน้าแรก</a>
     </div>
     <canvas id="bpChart" height="120"></canvas>
@@ -93,7 +94,8 @@
       const meta = document.getElementById('meta');
       const n = data.length;
       const avg = arr => arr.length ? (arr.reduce((a,b)=>a+b,0)/arr.length) : 0;
-      meta.textContent = `โหมด: ${mode==='demo'?'ตัวอย่าง':'ข้อมูลจริง'} | จุดข้อมูล: ${n} | ค่าเฉลี่ย SBP=${avg(sbp).toFixed(1)} DBP=${avg(dbp).toFixed(1)} HR=${avg(hr.filter(x=>x!=null)).toFixed(1)}`;
+      const hrAvg = avg(hr.filter(x=>x!=null));
+      meta.textContent = `โหมด: ${mode==='demo'?'ตัวอย่าง':'ข้อมูลจริง'} | จุดข้อมูล: ${n} | ค่าเฉลี่ย SBP=${avg(sbp).toFixed(1)} DBP=${avg(dbp).toFixed(1)} HR=${isFinite(hrAvg)?hrAvg.toFixed(1):'-'}`;
 
       const cfg = {
         type: 'line',
@@ -122,6 +124,16 @@
     document.getElementById('reload').onclick = ()=>{
       const days = document.getElementById('days').value;
       loadChart(days);
+    };
+
+    document.getElementById('sendWeekly').onclick = async ()=>{
+      try{
+        const r = await fetch('/line/send-weekly');
+        const t = await r.text();
+        alert(t || 'ส่งแล้ว');
+      }catch(e){
+        alert('ส่งไม่สำเร็จ: ' + e.message);
+      }
     };
 
     loadChart(30);
