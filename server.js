@@ -1,4 +1,4 @@
-// server.js — Withings OAuth + Notifications + LINE weekly summary + LINE webhook (patched)
+// server.js — Withings OAuth + Notifications + LINE + Demo BP fallback
 require('dotenv').config();
 const path = require('path');
 const express = require('express');
@@ -9,8 +9,7 @@ const line = require('@line/bot-sdk');
 
 const app = express();
 
-// ===================== LINE (REGISTER BEFORE BODY PARSERS) =====================
-// LINE config
+/* ===================== LINE (REGISTER BEFORE BODY PARSERS) ===================== */
 const lineConfig = (() => {
   const token = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
   const secret = process.env.LINE_CHANNEL_SECRET || '';
@@ -18,11 +17,8 @@ const lineConfig = (() => {
   return null;
 })();
 const lineClient = lineConfig ? new line.Client(lineConfig) : null;
-
-// Capture userId
 let LAST_LINE_USER_ID = null;
 
-// Webhook route: return 200 even if not configured so LINE "Verify" succeeds
 app.post(
   '/line/webhook',
   (req, res, next) => {
@@ -32,7 +28,6 @@ app.post(
     }
     return next();
   },
-  // IMPORTANT: no body parser before this middleware
   line.middleware(lineConfig || { channelAccessToken: 'dummy', channelSecret: 'dummy' }),
   async (req, res) => {
     try {
@@ -49,12 +44,11 @@ app.post(
       res.status(200).end();
     } catch (e) {
       console.error('LINE webhook error:', e.message);
-      res.status(200).end(); // still 200 to avoid Verify failure
+      res.status(200).end();
     }
   }
 );
 
-// Helper route always available
 app.get('/line/last-user', (req, res) => {
   if (!lineClient) {
     return res
@@ -68,12 +62,12 @@ app.get('/line/last-user', (req, res) => {
       : 'ยังไม่มี userId — กรุณาเพิ่มบอทเป็นเพื่อนและทักข้อความใส่มาที่บอทก่อน');
 });
 
-// ===================== BODY PARSERS & STATIC (AFTER LINE WEBHOOK) =====================
+/* ===================== BODY PARSERS & STATIC (AFTER LINE WEBHOOK) ===================== */
 app.use(express.urlencoded({ extended: true })); // for Withings notify (x-www-form-urlencoded)
 app.use(express.json());
 app.use('/public', express.static('public'));
 
-// ===================== WITHINGS OAUTH / API =====================
+/* ===================== WITHINGS OAUTH / API ===================== */
 const CLIENT_ID = process.env.WITHINGS_CLIENT_ID;
 const CLIENT_SECRET = process.env.WITHINGS_CLIENT_SECRET;
 const SCOPE = process.env.WITHINGS_SCOPE || 'user.metrics';
@@ -100,22 +94,16 @@ app.get('/', (req, res) => {
     <h1>Withings OAuth Quickstart + LINE</h1>
     <p>Base URL: <code>${base}</code></p>
     <p>Redirect URI (Withings Developer): <code>${base}/oauth/callback</code></p>
-    <p>Callback URI for Notifications (add in Withings Developer "Callback URI" list):<br/>
-      <code>${base}/withings/notify</code>
-    </p>
-    <p>LINE Webhook URL (for capturing userId):<br/>
-      <code>${base}/line/webhook</code>
-    </p>
+    <p>Callback URI (Withings webhook): <code>${base}/withings/notify</code></p>
+    <p>LINE Webhook URL: <code>${base}/line/webhook</code></p>
     <p><a href="${u.toString()}"><button>Authorize Withings ${USE_DEMO ? '(DEMO)' : ''}</button></a></p>
-    <p><a href="/chart">ดูกราฟ BP</a> (หลัง authorize)</p>
-    <p><a href="/withings/subscribe?appli=4">Subscribe Notifications (BP)</a> — ต้อง authorize แล้วก่อน</p>
-    <p><a href="/line/test-push">ทดสอบส่ง LINE</a> — ตั้งค่า LINE_* แล้ว และมี LINE_USER_ID</p>
-    <p><a href="/line/last-user">ดู userId ล่าสุดที่ webhook จับได้</a> (หลังจากทักแชตบอท)</p>
+    <p><a href="/chart">ดูกราฟ BP</a> (มีโหมดข้อมูลตัวอย่างอัตโนมัติ)</p>
+    <p><a href="/withings/subscribe?appli=4">Subscribe Notifications (BP)</a></p>
+    <p><a href="/line/test-push">ทดสอบส่ง LINE</a> • <a href="/line/last-user">ดู userId ล่าสุด</a></p>
     <pre>Tokens: ${TOKENS ? 'READY for userid ' + TOKENS.userid : 'None'}</pre>
   `);
 });
 
-// OAuth callback
 app.get('/oauth/callback', async (req, res) => {
   const { code, error } = req.query;
   const redirect_uri = `${baseUrlFrom(req)}/oauth/callback`;
@@ -145,18 +133,13 @@ app.get('/oauth/callback', async (req, res) => {
     res.type('html').send(`
       <h2>Authorized ✅</h2>
       <p>UserID: ${TOKENS.userid}</p>
-      <p>Access token พร้อมใช้งาน</p>
-      <p>ต่อไป: 
-        <a href="/withings/subscribe?appli=4">กดสมัคร Notifications (BP)</a> 
-        แล้วเปิด <a href="/chart">กราฟ BP</a>
-      </p>
+      <p>ต่อไป: <a href="/withings/subscribe?appli=4">สมัคร Notifications (BP)</a> หรือ <a href="/chart">ดูกราฟ</a></p>
     `);
   } catch (e) {
     res.status(500).send('Token exchange failed: ' + e.message);
   }
 });
 
-// Token refresh helper
 async function ensureAccessToken() {
   if (!TOKENS) throw new Error('Not authorized yet.');
   const now = Math.floor(Date.now() / 1000);
@@ -180,7 +163,7 @@ async function ensureAccessToken() {
   return TOKENS.access_token;
 }
 
-// Withings data (BP)
+/* ===== Real BP data ===== */
 app.get('/api/bp', async (req, res) => {
   try {
     const access = await ensureAccessToken();
@@ -222,23 +205,41 @@ app.get('/api/bp', async (req, res) => {
   }
 });
 
-// Withings notifications
+/* ===== Demo BP data fallback ===== */
+function generateDemoBP(days = 30) {
+  const out = [];
+  const now = Math.floor(Date.now() / 1000);
+  for (let d = days - 1; d >= 0; d--) {
+    // morning
+    const ts1 = now - d * 24 * 3600 + 8 * 3600 + Math.floor(Math.random() * 1800); // ~08:00
+    // evening
+    const ts2 = now - d * 24 * 3600 + 20 * 3600 + Math.floor(Math.random() * 1800); // ~20:00
+    const baselineSBP = 124 + Math.round((Math.random() - 0.5) * 12); // 118–130
+    const baselineDBP = 78 + Math.round((Math.random() - 0.5) * 8);   // 74–82
+    const spike = Math.random() < 0.12 ? 10 + Math.round(Math.random() * 8) : 0; // บางวันสูงขึ้น
+    const hr1 = 68 + Math.round((Math.random() - 0.5) * 10);
+    const hr2 = 72 + Math.round((Math.random() - 0.5) * 10);
+    out.push({ ts: ts1, sbp: baselineSBP, dbp: baselineDBP, hr: hr1 });
+    out.push({ ts: ts2, sbp: baselineSBP + spike, dbp: baselineDBP + Math.round(spike/2), hr: hr2 });
+  }
+  out.sort((a, b) => a.ts - b.ts);
+  return out;
+}
+
+app.get('/api/bp-demo', (req, res) => {
+  const days = Math.max(1, Math.min(365, parseInt(req.query.days || '30', 10)));
+  res.json(generateDemoBP(days));
+});
+
+/* ===== Withings notifications ===== */
 app.get('/withings/subscribe', async (req, res) => {
   const appli = parseInt(req.query.appli || '4', 10); // 4 = blood pressure
   try {
     const access = await ensureAccessToken();
     const callbackurl = `${baseUrlFrom(req)}/withings/notify`;
-    const payload = {
-      action: 'subscribe',
-      callbackurl,
-      appli,
-      comment: 'demo subscribe'
-    };
+    const payload = { action: 'subscribe', callbackurl, appli, comment: 'demo subscribe' };
     const { data } = await axios.post('https://wbsapi.withings.net/notify', qs.stringify(payload), {
-      headers: {
-        'Authorization': `Bearer ${access}`,
-        'Content-Type': 'application/x-www-form-urlencoded'
-      }
+      headers: { 'Authorization': `Bearer ${access}`, 'Content-Type': 'application/x-www-form-urlencoded' }
     });
     res.type('json').send({ subscribe_payload: payload, response: data });
   } catch (e) {
@@ -260,10 +261,7 @@ app.post('/withings/notify', async (req, res) => {
       enddate: enddate || Math.floor(Date.now()/1000)
     };
     const resp = await axios.post('https://wbsapi.withings.net/measure', qs.stringify(params), {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': `Bearer ${access}`
-      }
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Authorization': `Bearer ${access}` }
     });
     console.log('Fetched new measures count:', resp.data?.body?.measuregrps?.length || 0);
   } catch (err) {
@@ -271,23 +269,14 @@ app.post('/withings/notify', async (req, res) => {
   }
 });
 
-// ===================== LINE PUSH & CRON =====================
+/* ===== LINE push & cron ===== */
 async function buildWeeklySummaryTH(days=7){
   const access = await ensureAccessToken();
   const end = Math.floor(Date.now()/1000);
   const start = end - days*24*60*60;
-  const params = {
-    action: 'getmeas',
-    meastypes: '9,10,11',
-    category: 1,
-    startdate: start,
-    enddate: end
-  };
+  const params = { action: 'getmeas', meastypes: '9,10,11', category: 1, startdate: start, enddate: end };
   const { data } = await axios.post('https://wbsapi.withings.net/measure', qs.stringify(params), {
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Authorization': `Bearer ${access}`
-    }
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Authorization': `Bearer ${access}` }
   });
   const grps = data.body?.measuregrps || [];
   const rows = [];
@@ -319,7 +308,6 @@ async function buildWeeklySummaryTH(days=7){
   return msg;
 }
 
-// Manual trigger to send weekly summary to LINE_USER_ID
 app.get('/line/send-weekly', async (req, res) => {
   try {
     if (!lineClient) return res.status(400).send('LINE not configured');
@@ -333,7 +321,6 @@ app.get('/line/send-weekly', async (req, res) => {
   }
 });
 
-// Simple test push
 app.get('/line/test-push', async (req, res) => {
   try {
     if (!lineClient) return res.status(400).send('LINE not configured');
@@ -346,7 +333,7 @@ app.get('/line/test-push', async (req, res) => {
   }
 });
 
-// ===================== UI =====================
+/* ===================== UI ===================== */
 app.get('/chart', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'chart.html'));
 });
