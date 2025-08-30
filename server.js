@@ -1,4 +1,4 @@
-// server.js — Withings OAuth + Notifications + LINE + Demo BP fallback
+// server.js — Withings OAuth + Notifications + LINE + Demo BP + Weekly Button (final)
 require('dotenv').config();
 const path = require('path');
 const express = require('express');
@@ -10,6 +10,7 @@ const line = require('@line/bot-sdk');
 const app = express();
 
 /* ===================== LINE (REGISTER BEFORE BODY PARSERS) ===================== */
+// LINE config
 const lineConfig = (() => {
   const token = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
   const secret = process.env.LINE_CHANNEL_SECRET || '';
@@ -19,6 +20,7 @@ const lineConfig = (() => {
 const lineClient = lineConfig ? new line.Client(lineConfig) : null;
 let LAST_LINE_USER_ID = null;
 
+// Webhook route: return 200 even if not configured so LINE "Verify" succeeds
 app.post(
   '/line/webhook',
   (req, res, next) => {
@@ -28,6 +30,7 @@ app.post(
     }
     return next();
   },
+  // IMPORTANT: no body parser before this middleware
   line.middleware(lineConfig || { channelAccessToken: 'dummy', channelSecret: 'dummy' }),
   async (req, res) => {
     try {
@@ -44,11 +47,12 @@ app.post(
       res.status(200).end();
     } catch (e) {
       console.error('LINE webhook error:', e.message);
-      res.status(200).end();
+      res.status(200).end(); // still 200 to avoid Verify failure
     }
   }
 );
 
+// Helper route always available
 app.get('/line/last-user', (req, res) => {
   if (!lineClient) {
     return res
@@ -93,13 +97,17 @@ app.get('/', (req, res) => {
   res.type('html').send(`
     <h1>Withings OAuth Quickstart + LINE</h1>
     <p>Base URL: <code>${base}</code></p>
-    <p>Redirect URI (Withings Developer): <code>${base}/oauth/callback</code></p>
+    <p>Redirect URI: <code>${base}/oauth/callback</code></p>
     <p>Callback URI (Withings webhook): <code>${base}/withings/notify</code></p>
     <p>LINE Webhook URL: <code>${base}/line/webhook</code></p>
     <p><a href="${u.toString()}"><button>Authorize Withings ${USE_DEMO ? '(DEMO)' : ''}</button></a></p>
-    <p><a href="/chart">ดูกราฟ BP</a> (มีโหมดข้อมูลตัวอย่างอัตโนมัติ)</p>
-    <p><a href="/withings/subscribe?appli=4">Subscribe Notifications (BP)</a></p>
-    <p><a href="/line/test-push">ทดสอบส่ง LINE</a> • <a href="/line/last-user">ดู userId ล่าสุด</a></p>
+    <p>
+      <a href="/chart">ดูกราฟ BP</a> •
+      <a href="/withings/subscribe?appli=4">Subscribe Notifications (BP)</a> •
+      <a href="/line/send-weekly">ส่งสรุป 7 วัน (LINE)</a> •
+      <a href="/line/test-push">ทดสอบส่ง LINE</a> •
+      <a href="/line/last-user">ดู userId ล่าสุด</a>
+    </p>
     <pre>Tokens: ${TOKENS ? 'READY for userid ' + TOKENS.userid : 'None'}</pre>
   `);
 });
@@ -210,13 +218,11 @@ function generateDemoBP(days = 30) {
   const out = [];
   const now = Math.floor(Date.now() / 1000);
   for (let d = days - 1; d >= 0; d--) {
-    // morning
-    const ts1 = now - d * 24 * 3600 + 8 * 3600 + Math.floor(Math.random() * 1800); // ~08:00
-    // evening
+    const ts1 = now - d * 24 * 3600 + 8 * 3600 + Math.floor(Math.random() * 1800);  // ~08:00
     const ts2 = now - d * 24 * 3600 + 20 * 3600 + Math.floor(Math.random() * 1800); // ~20:00
     const baselineSBP = 124 + Math.round((Math.random() - 0.5) * 12); // 118–130
     const baselineDBP = 78 + Math.round((Math.random() - 0.5) * 8);   // 74–82
-    const spike = Math.random() < 0.12 ? 10 + Math.round(Math.random() * 8) : 0; // บางวันสูงขึ้น
+    const spike = Math.random() < 0.12 ? 10 + Math.round(Math.random() * 8) : 0; // some days spike
     const hr1 = 68 + Math.round((Math.random() - 0.5) * 10);
     const hr2 = 72 + Math.round((Math.random() - 0.5) * 10);
     out.push({ ts: ts1, sbp: baselineSBP, dbp: baselineDBP, hr: hr1 });
@@ -269,7 +275,7 @@ app.post('/withings/notify', async (req, res) => {
   }
 });
 
-/* ===== LINE push & cron ===== */
+/* ===================== LINE push & cron ===================== */
 async function buildWeeklySummaryTH(days=7){
   const access = await ensureAccessToken();
   const end = Math.floor(Date.now()/1000);
@@ -308,6 +314,7 @@ async function buildWeeklySummaryTH(days=7){
   return msg;
 }
 
+// manual trigger button
 app.get('/line/send-weekly', async (req, res) => {
   try {
     if (!lineClient) return res.status(400).send('LINE not configured');
@@ -321,6 +328,7 @@ app.get('/line/send-weekly', async (req, res) => {
   }
 });
 
+// quick test push
 app.get('/line/test-push', async (req, res) => {
   try {
     if (!lineClient) return res.status(400).send('LINE not configured');
@@ -332,6 +340,21 @@ app.get('/line/test-push', async (req, res) => {
     res.status(500).send('LINE push failed: ' + e.message);
   }
 });
+
+// weekly cron Mon 09:00 Asia/Bangkok
+if (lineClient) {
+  cron.schedule('0 9 * * MON', async () => {
+    try {
+      const to = process.env.LINE_USER_ID;
+      if (!to || !TOKENS) return;
+      const text = await buildWeeklySummaryTH(7);
+      await lineClient.pushMessage(to, { type: 'text', text });
+      console.log('[cron] Sent weekly summary to LINE_USER_ID');
+    } catch (e) {
+      console.error('[cron] Failed weekly summary:', e.message);
+    }
+  }, { timezone: 'Asia/Bangkok' });
+}
 
 /* ===================== UI ===================== */
 app.get('/chart', (req, res) => {
