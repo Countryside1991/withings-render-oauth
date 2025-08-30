@@ -1,10 +1,8 @@
 {
   "name": "withings-render-oauth",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "dependencies": {
     "@line/bot-sdk": "^7.5.2",
     "axios": "^1.7.0",
