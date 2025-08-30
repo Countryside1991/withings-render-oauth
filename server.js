@@ -1,142 +1,171 @@
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BP Trend</title>
-  <style>
-    body{font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin:24px}
-    .card{max-width:920px;margin:auto;border:1px solid #e5e7eb;border-radius:16px;padding:16px;box-shadow:0 1px 6px rgba(0,0,0,.05)}
-    h1{font-size:20px;margin:0 0 12px}
-    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-    input,button,select{padding:8px 12px;border:1px solid #d1d5db;border-radius:10px}
-    button{cursor:pointer}
-    .muted{color:#6b7280}
-    .badge{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid #d1d5db;margin-left:8px}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>ความดันโลหิต (BP) — แนวโน้ม <span id="mode" class="badge" style="display:none"></span></h1>
-    <p class="muted">ถ้ายังไม่ authorize ให้กลับไปหน้าแรกแล้วกดปุ่ม Authorize ก่อน</p>
-    <div class="row">
-      <label>ช่วงวัน:
-        <select id="days">
-          <option value="7">7 วัน</option>
-          <option value="14">14 วัน</option>
-          <option value="30" selected>30 วัน</option>
-          <option value="90">90 วัน</option>
-        </select>
-      </label>
-      <label style="display:flex;align-items:center;gap:6px">
-        <input type="checkbox" id="useDemo" checked />
-        ใช้ข้อมูลตัวอย่างอัตโนมัติเมื่อไม่มีข้อมูลจริง
-      </label>
-      <button id="reload">โหลดข้อมูล</button>
-      <button id="sendWeekly">ส่งสรุป 7 วัน (LINE)</button>
-      <a href="/" style="margin-left:auto">หน้าแรก</a>
-    </div>
-    <canvas id="bpChart" height="120"></canvas>
-    <pre id="meta" class="muted"></pre>
-  </div>
+// server.js — Withings OAuth + Notifications + LINE + Demo BP + Weekly Button + Advice (final-one-file)
+require('dotenv').config();
+const path = require('path');
+const express = require('express');
+const axios = require('axios');
+const qs = require('qs');
+const cron = require('node-cron');
+const line = require('@line/bot-sdk');
 
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script>
-    const ctx = document.getElementById('bpChart');
-    let chart;
+const app = express();
 
-    async function fetchJSON(url){
-      const res = await fetch(url);
-      if(!res.ok) throw new Error(await res.text());
-      return res.json();
+/* ===================== LINE (REGISTER BEFORE BODY PARSERS) ===================== */
+// LINE config
+const lineConfig = (() => {
+  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
+  const secret = process.env.LINE_CHANNEL_SECRET || '';
+  if (token && secret) return { channelAccessToken: token, channelSecret: secret };
+  return null;
+})();
+const lineClient = lineConfig ? new line.Client(lineConfig) : null;
+let LAST_LINE_USER_ID = null;
+
+// Webhook route: return 200 even if not configured so LINE "Verify" succeeds
+app.post(
+  '/line/webhook',
+  (req, res, next) => {
+    if (!lineClient || !lineConfig) {
+      console.warn('[LINE] Not configured yet, returning 200 for Verify');
+      return res.status(200).end();
     }
-
-    async function loadChart(days=30){
-      let mode = 'real';
-      let data = [];
-      try {
-        data = await fetchJSON(`/api/bp?days=${days}`);
-      } catch (e) {
-        console.warn('Fetch real BP failed:', e.message);
-        data = [];
-      }
-
-      const allowDemo = document.getElementById('useDemo').checked;
-      if ((!data || data.length === 0) && allowDemo) {
-        try {
-          data = await fetchJSON(`/api/bp-demo?days=${days}`);
-          mode = 'demo';
-        } catch (e) {
-          console.warn('Fetch demo BP failed:', e.message);
+    return next();
+  },
+  // IMPORTANT: no body parser before this middleware
+  line.middleware(lineConfig || { channelAccessToken: 'dummy', channelSecret: 'dummy' }),
+  async (req, res) => {
+    try {
+      const events = req.body.events || [];
+      for (const ev of events) {
+        if (ev.source?.userId) LAST_LINE_USER_ID = ev.source.userId;
+        if (ev.type === 'message' && ev.replyToken && lineClient) {
+          await lineClient.replyMessage(ev.replyToken, {
+            type: 'text',
+            text: `รับข้อมูลแล้ว ✅ userId: ${ev.source.userId}`
+          });
         }
       }
-
-      const modeBadge = document.getElementById('mode');
-      if (mode === 'demo') {
-        modeBadge.textContent = 'แสดงข้อมูลตัวอย่าง';
-        modeBadge.style.display = 'inline-block';
-      } else {
-        modeBadge.style.display = data.length ? 'none' : 'inline-block';
-        if (!data.length) { modeBadge.textContent = 'ไม่มีข้อมูล'; }
-      }
-
-      if (!data || !data.length) {
-        if(chart){ chart.destroy(); }
-        document.getElementById('meta').textContent = 'ไม่พบข้อมูลในช่วงวันที่เลือก';
-        return;
-      }
-
-      const labels = data.map(d=>new Date(d.ts*1000).toLocaleString());
-      const sbp = data.map(d=>d.sbp);
-      const dbp = data.map(d=>d.dbp);
-      const hr  = data.map(d=>d.hr);
-
-      const meta = document.getElementById('meta');
-      const n = data.length;
-      const avg = arr => arr.length ? (arr.reduce((a,b)=>a+b,0)/arr.length) : 0;
-      const hrAvg = avg(hr.filter(x=>x!=null));
-      meta.textContent = `โหมด: ${mode==='demo'?'ตัวอย่าง':'ข้อมูลจริง'} | จุดข้อมูล: ${n} | ค่าเฉลี่ย SBP=${avg(sbp).toFixed(1)} DBP=${avg(dbp).toFixed(1)} HR=${isFinite(hrAvg)?hrAvg.toFixed(1):'-'}`;
-
-      const cfg = {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [
-            { label: 'SBP', data: sbp, pointRadius: 2 },
-            { label: 'DBP', data: dbp, pointRadius: 2 },
-            { label: 'HR',  data: hr,  pointRadius: 3, yAxisID: 'y1' }
-          ]
-        },
-        options: {
-          responsive: true,
-          interaction: { mode: 'index', intersect: false },
-          scales: {
-            y: { title: { display: true, text: 'mmHg' } },
-            y1: { position: 'right', title: { display: true, text: 'bpm' }, grid: { drawOnChartArea: false } }
-          }
-        }
-      };
-
-      if(chart){ chart.destroy(); }
-      chart = new Chart(ctx, cfg);
+      res.status(200).end();
+    } catch (e) {
+      console.error('LINE webhook error:', e.message);
+      res.status(200).end(); // still 200 to avoid Verify failure
     }
+  }
+);
 
-    document.getElementById('reload').onclick = ()=>{
-      const days = document.getElementById('days').value;
-      loadChart(days);
+// Helper route always available
+app.get('/line/last-user', (req, res) => {
+  if (!lineClient) {
+    return res
+      .type('text')
+      .send('LINE not configured — ใส่ LINE_CHANNEL_ACCESS_TOKEN และ LINE_CHANNEL_SECRET ใน Render แล้ว Restart');
+  }
+  res
+    .type('text')
+    .send(LAST_LINE_USER_ID
+      ? `LAST_LINE_USER_ID = ${LAST_LINE_USER_ID}`
+      : 'ยังไม่มี userId — กรุณาเพิ่มบอทเป็นเพื่อนและทักข้อความใส่มาที่บอทก่อน');
+});
+
+/* ===================== BODY PARSERS & STATIC (AFTER LINE WEBHOOK) ===================== */
+app.use(express.urlencoded({ extended: true })); // for Withings notify (x-www-form-urlencoded)
+app.use(express.json());
+app.use('/public', express.static('public'));
+
+/* ===================== WITHINGS OAUTH / API ===================== */
+const CLIENT_ID = process.env.WITHINGS_CLIENT_ID;
+const CLIENT_SECRET = process.env.WITHINGS_CLIENT_SECRET;
+const SCOPE = process.env.WITHINGS_SCOPE || 'user.metrics';
+const USE_DEMO = String(process.env.WITHINGS_USE_DEMO || 'true') === 'true';
+
+// Token store (demo only — replace with DB in production)
+let TOKENS = null; // { access_token, refresh_token, expires_at, userid }
+
+function baseUrlFrom(req){
+  return process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || (`https://${req.headers.host}`);
+}
+
+app.get('/', (req, res) => {
+  const base = baseUrlFrom(req);
+  const u = new URL('https://account.withings.com/oauth2_user/authorize2');
+  u.searchParams.set('response_type', 'code');
+  u.searchParams.set('client_id', CLIENT_ID || '');
+  u.searchParams.set('scope', SCOPE);
+  u.searchParams.set('redirect_uri', `${base}/oauth/callback`);
+  u.searchParams.set('state', Math.random().toString(36).slice(2));
+  if (USE_DEMO) u.searchParams.set('mode', 'demo');
+
+  res.type('html').send(`
+    <h1>Withings OAuth Quickstart + LINE</h1>
+    <p>Base URL: <code>${base}</code></p>
+    <p>Redirect URI: <code>${base}/oauth/callback</code></p>
+    <p>Callback URI (Withings webhook): <code>${base}/withings/notify</code></p>
+    <p>LINE Webhook URL: <code>${base}/line/webhook</code></p>
+    <p><a href="${u.toString()}"><button>Authorize Withings ${USE_DEMO ? '(DEMO)' : ''}</button></a></p>
+    <p>
+      <a href="/chart">ดูกราฟ BP</a> •
+      <a href="/withings/subscribe?appli=4">Subscribe Notifications (BP)</a> •
+      <a href="/line/send-weekly">ส่งสรุป 7 วัน (LINE)</a> •
+      <a href="/line/test-push">ทดสอบส่ง LINE</a> •
+      <a href="/line/last-user">ดู userId ล่าสุด</a>
+    </p>
+    <pre>Tokens: ${TOKENS ? 'READY for userid ' + TOKENS.userid : 'None'}</pre>
+  `);
+});
+
+app.get('/oauth/callback', async (req, res) => {
+  const { code, error } = req.query;
+  const redirect_uri = `${baseUrlFrom(req)}/oauth/callback`;
+  if (error) return res.status(400).send(`OAuth error: ${error}`);
+  if (!code) return res.status(400).send('Missing ?code');
+  try {
+    const payload = {
+      action: 'requesttoken',
+      grant_type: 'authorization_code',
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      code,
+      redirect_uri
     };
-
-    document.getElementById('sendWeekly').onclick = async ()=>{
-      try{
-        const r = await fetch('/line/send-weekly');
-        const t = await r.text();
-        alert(t || 'ส่งแล้ว');
-      }catch(e){
-        alert('ส่งไม่สำเร็จ: ' + e.message);
-      }
+    const { data } = await axios.post('https://wbsapi.withings.net/v2/oauth2', qs.stringify(payload), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+    if (data.status !== 0) throw new Error(JSON.stringify(data));
+    const body = data.body;
+    const expires_at = Math.floor(Date.now() / 1000) + (body.expires_in || 3 * 60 * 60);
+    TOKENS = {
+      access_token: body.access_token,
+      refresh_token: body.refresh_token,
+      expires_at,
+      userid: String(body.userid)
     };
+    res.type('html').send(`
+      <h2>Authorized ✅</h2>
+      <p>UserID: ${TOKENS.userid}</p>
+      <p>ต่อไป: <a href="/withings/subscribe?appli=4">สมัคร Notifications (BP)</a> หรือ <a href="/chart">ดูกราฟ</a></p>
+    `);
+  } catch (e) {
+    res.status(500).send('Token exchange failed: ' + e.message);
+  }
+});
 
-    loadChart(30);
-  </script>
-</body>
-</html>
+async function ensureAccessToken() {
+  if (!TOKENS) throw new Error('Not authorized yet.');
+  const now = Math.floor(Date.now() / 1000);
+  if (now < (TOKENS.expires_at - 60)) return TOKENS.access_token;
+
+  const payload = {
+    action: 'requesttoken',
+    grant_type: 'refresh_token',
+    client_id: CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+    refresh_token: TOKENS.refresh_token
+  };
+  const { data } = await axios.post('https://wbsapi.withings.net/v2/oauth2', qs.stringify(payload), {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+  });
+  if (data.status !== 0) throw new Error('Refresh failed: ' + JSON.stringify(data));
+  const body = data.body;
+  TOKENS.access_token = body.access_token;
+  TOKENS.refresh_token = body.refresh_token || TOKENS.refresh_token;
+  TOKENS.expires_at = Math.floor(Date.now() / 1000) + (body.expires_in || 3 * 60 * 60);
+  return TOKENS.access
